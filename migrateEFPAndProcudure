@@ -1,0 +1,25 @@
+import sqlite3
+import os
+
+# Construct the path to the database file on the Desktop
+desktop_path = os.path.join(os.path.expanduser("~"), "Desktop", "RUNWY_DATA.db")
+
+# Connect to the SQLite database
+conn = sqlite3.connect(desktop_path)
+cursor = conn.cursor()
+
+try:
+    # Add columns with default empty string if they don't already exist
+    cursor.execute("ALTER TABLE 'primary_P_G_base_Airport - Runways' ADD COLUMN EFP TEXT DEFAULT '';")
+    cursor.execute("ALTER TABLE 'primary_P_G_base_Airport - Runways' ADD COLUMN Procedure TEXT DEFAULT '';")
+
+    # Commit the changes
+    conn.commit()
+    print("Columns 'EFP' and 'Procedure' added successfully with an empty string as the default value!")
+
+except sqlite3.OperationalError as e:
+    print(f"Error: {e}")
+
+finally:
+    # Close the database connection
+    conn.close()
