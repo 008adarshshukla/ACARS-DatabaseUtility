@@ -6,50 +6,12 @@ import sys
 # Path to the SQLite database file
 db_path = os.path.expanduser('~/Dev/MCDUWorldwideDatabase.db')
 
-# Table names
+# Source and intermediate table names
 source_table = "primary_P_D_base_Airport - SIDs"
-target_table = "primary_P_D_base_Airport - SIDs"
-temp_table = "temp_SIDs_new"
-
-# Desired columns in the new schema
-target_cols = [
-    "CustomerAreaCode",
-    "LandingFacilityIcaoIdentifier",
-    "SIDSTARApproachIdentifier",
-    "RouteType",
-    "TransitionIdentifier",
-    "SequenceNumber",
-    "FixIcaoRegionCode",
-    "FixIdentifier",
-    "FixIdentifierLatitude_WGS84",
-    "FixIdentifierLongitude_WGS84",  # override with dept
-    "WaypointDescriptionCodes",
-    "TurnDirection",
-    "RNP",
-    "PathAndTermination",
-    "RecommendedNavaid",
-    "RecommendedNavaidLatitude_WGS84",
-    "RecommendedNavaidLongitude_WGS84",
-    "ARCRadius",
-    "Theta",
-    "Rho",
-    "MagneticCourse",
-    "RouteDistanceHoldingDistanceOrTime",
-    "DistanceOrTime",
-    "AltitudeDescription",
-    "Altitude_1",
-    "Altitude_2",
-    "TransitionAltitude",
-    "SpeedLimitDescription",
-    "SpeedLimit",
-    "VerticalAngle",
-    "center_waypoint",
-    "CenterWaypointLatitude_WGS84",
-    "CenterWaypointLongitude_WGS84",
-    "AircraftCategory"
-]
+new_table    = "primary_P_D_base_Airport - SIDs-new"
 
 def main():
+    # 1) Verify database file exists
     if not os.path.isfile(db_path):
         print(f"Error: database file not found at {db_path}", file=sys.stderr)
         sys.exit(1)
@@ -57,65 +19,66 @@ def main():
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
 
-    # Read source schema info
+    # 2) Read source schema
     cur.execute(f'PRAGMA table_info("{source_table}")')
-    info = cur.fetchall()  # (cid, name, type, notnull, dflt, pk)
-    name_to_idx = {row[1]: row[0] for row in info}
+    cols_info = cur.fetchall()  # (cid, name, type, notnull, dflt_value, pk)
+    col_names = [row[1] for row in cols_info]
+    col_types = {row[1]: row[2] for row in cols_info}
+    name_to_idx = {row[1]: row[0] for row in cols_info}
 
-    # Drop temp if exists
-    cur.execute(f'DROP TABLE IF EXISTS "{temp_table}";')
+    # 3) Drop intermediate table if it exists
+    cur.execute(f'DROP TABLE IF EXISTS "{new_table}";')
 
-    # Create temp table with target schema and types
-    cols_defs = []
-    for col in target_cols:
-        col_type = info[name_to_idx[col]][2]
-        cols_defs.append(f'"{col}" {col_type}')
-    cur.execute(f'CREATE TABLE "{temp_table}" ({", ".join(cols_defs)});')
+    # 4) Create new table with identical schema
+    cols_defs = ", ".join(f'"{name}" {col_types[name]}' for name in col_names)
+    cur.execute(f'CREATE TABLE "{new_table}" ({cols_defs});')
 
-    # Prepare insert statement
-    cols_list = ", ".join(f'"{c}"' for c in target_cols)
-    placeholders = ", ".join("?" for _ in target_cols)
-    insert_sql = f'INSERT INTO "{temp_table}" ({cols_list}) VALUES ({placeholders});'
+    # 5) Prepare insert SQL
+    placeholders = ", ".join("?" for _ in col_names)
+    cols_list    = ", ".join(f'"{c}"' for c in col_names)
+    insert_sql   = f'INSERT INTO "{new_table}" ({cols_list}) VALUES ({placeholders});'
 
-    # Fetch all rows
+    # 6) Fetch all rows from source
     cur.execute(f'SELECT * FROM "{source_table}";')
     rows = cur.fetchall()
 
-    # Process rows
+    # 7) Transform and insert rows
     for row in rows:
-        orig = row[name_to_idx["FixIdentifierLongitude_WGS84"]]
-        dept_str = orig if isinstance(orig, str) else ""
+        trans_id = row[name_to_idx["TransitionIdentifier"]]
+        lid      = row[name_to_idx["LandingFacilityIcaoIdentifier"]]
 
-        def make_vals(dept_override):
-            return [
-                dept_override if c == "FixIdentifierLongitude_WGS84" else row[name_to_idx[c]]
-                for c in target_cols
-            ]
+        def make_row(new_trans):
+            new_row = list(row)
+            new_row[name_to_idx["TransitionIdentifier"]] = new_trans
+            return tuple(new_row)
 
-        if dept_str.startswith("RW") and dept_str.endswith("B"):
-            num = dept_str[2:-1]
-            for side in ("L", "R"):
-                cur.execute(insert_sql, make_vals(f"RW{num}{side}"))
-        elif dept_str == "ALL":
-            lid = row[name_to_idx["LandingFacilityIcaoIdentifier"]]
+        # Expand ALL
+        if trans_id == "ALL":
             cur.execute(
                 'SELECT RunwayIdentifier FROM "primary_P_G_base_Airport - Runways" '
-                'WHERE LandingFacilityIcaoIdentifier = ?',
-                (lid,)
+                'WHERE LandingFacilityIcaoIdentifier = ?', (lid,)
             )
             for (rw,) in cur.fetchall():
-                cur.execute(insert_sql, make_vals(rw))
-        else:
-            cur.execute(insert_sql, make_vals(orig))
+                cur.execute(insert_sql, make_row(rw))
 
-    # Replace source table
-    # cur.execute(f'DROP TABLE "{source_table}";')
+        # Split RW..B into L and R
+        elif isinstance(trans_id, str) and trans_id.startswith("RW") and trans_id.endswith("B"):
+            base = trans_id[:-1]
+            cur.execute(insert_sql, make_row(base + "L"))
+            cur.execute(insert_sql, make_row(base + "R"))
+
+        # Copy unchanged
+        else:
+            cur.execute(insert_sql, row)
+
+    # 8) Swap tables: drop old, rename new to original name
     cur.execute(f'DROP TABLE "{source_table}";')
-    cur.execute(f'ALTER TABLE "{temp_table}" RENAME TO "{target_table}";')
+    cur.execute(f'ALTER TABLE "{new_table}" RENAME TO "{source_table}";')
 
     conn.commit()
     conn.close()
-    print("SIDs migration completed successfully.")
+    print(f"Migration complete: '{source_table}' updated with expanded rows.")
 
 if __name__ == "__main__":
     main()
+
