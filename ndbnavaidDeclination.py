@@ -5,9 +5,16 @@ import aiohttp
 import json
 
 # Database path
-db_path = os.path.expanduser("~/Dev/MCDUDatabase.db")
+db_path = os.path.expanduser('~/Dev/MCDUWorldwideDatabase.db')
 
-# API URL and parameters
+# Change this to switch tables:
+# tableName = "primary_D_B_base_Navaid_Enroute - NDB Navaid"
+tableName = "primary_D_B_base_Navaid_Terminal - NDB Navaid"
+
+# We'll use a quoted version everywhere:
+quoted_table = f'"{tableName}"'
+
+# API URL and base parameters
 api_url = "https://www.ngdc.noaa.gov/geomag-web/calculators/calculateDeclination"
 params_template = {
     "browserRequest": "true",
@@ -20,42 +27,41 @@ params_template = {
     "resultFormat": "json"
 }
 
-async def fetch_declination(session, ndb_identifier, lat, lon):
+async def fetch_declination(session, ndb_id, lat, lon):
     lat1 = abs(lat)
-    lat1Hemisphere = "N" if lat >= 0 else "S"
+    latHem = "N" if lat >= 0 else "S"
     lon1 = abs(lon)
-    lon1Hemisphere = "E" if lon >= 0 else "W"
+    lonHem = "E" if lon >= 0 else "W"
     params = {
         **params_template,
         "lat1": lat1,
-        "lat1Hemisphere": lat1Hemisphere,
+        "lat1Hemisphere": latHem,
         "lon1": lon1,
-        "lon1Hemisphere": lon1Hemisphere
+        "lon1Hemisphere": lonHem
     }
 
     async with session.get(api_url, params=params) as response:
+        text = await response.text()
         if response.status == 200:
             try:
-                text = await response.text()
                 data = json.loads(text)
-                declination = data["result"][0]["declination"]
-                return ndb_identifier, declination
-            except (json.JSONDecodeError, KeyError, IndexError) as e:
-                print(f"Error parsing JSON response for NDB {ndb_identifier}: {e}")
-                return ndb_identifier, None
+                decl = data["result"][0]["declination"]
+                return ndb_id, decl
+            except (KeyError, IndexError, json.JSONDecodeError) as e:
+                print(f"[JSON error] {ndb_id}: {e}")
         else:
-            print(f"API request failed for NDB {ndb_identifier}: {response.status}")
-            return ndb_identifier, None
+            print(f"[HTTP {response.status}] {ndb_id}")
+    return ndb_id, None
 
 async def main():
-    # Connect to the database
+    # 1) Connect to the database
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
-    # Add the Declination column if it doesn't exist
+    # 2) Add the Declination column if it doesn't exist
     try:
-        cursor.execute('''
-            ALTER TABLE "primary_D_B_base_Navaid - NDB Navaid"
+        cursor.execute(f'''
+            ALTER TABLE {quoted_table}
             ADD COLUMN Declination REAL
         ''')
         conn.commit()
@@ -63,65 +69,65 @@ async def main():
     except sqlite3.OperationalError:
         print("Declination column already exists.")
 
-    # Query data from the table
-    cursor.execute('''
+    # 3) Query data
+    cursor.execute(f'''
         SELECT NDBIdentifier, NDBLatitude_WGS84, NDBLongitude_WGS84
-        FROM "primary_D_B_base_Navaid - NDB Navaid"
+          FROM {quoted_table}
     ''')
+    rows = cursor.fetchall()
+    total = len(rows)
+    print(f"Total NDBs: {total}")
 
-    all_rows = cursor.fetchall()
     tasks = []
 
     async with aiohttp.ClientSession() as session:
-        for row in all_rows:
-            ndb_identifier, lat_str, lon_str = row
-            if lat_str is None or lon_str is None:
-                print(f"Skipping NDB {ndb_identifier} due to missing coordinates.")
+        for ndb_id, lat_s, lon_s in rows:
+            if not lat_s or not lon_s:
+                print(f"Skipping {ndb_id}: missing coords")
                 continue
 
             try:
-                lat = float(lat_str)
-                lon = float(lon_str)
-                tasks.append(fetch_declination(session, ndb_identifier, lat, lon))
+                lat = float(lat_s)
+                lon = float(lon_s)
             except ValueError:
-                print(f"Invalid coordinates for NDB {ndb_identifier}. Skipping.")
+                print(f"Skipping {ndb_id}: invalid coords")
                 continue
 
-            # Process in batches of 50
-            if len(tasks) == 50:
-                results = await asyncio.gather(*tasks)
-                update_count = 0
-                for ndb_identifier, declination in results:
-                    if declination is not None:
-                        cursor.execute('''
-                            UPDATE "primary_D_B_base_Navaid - NDB Navaid"
-                            SET Declination = ?
-                            WHERE NDBIdentifier = ?
-                        ''', (declination, ndb_identifier))
-                        update_count += 1
+            tasks.append(fetch_declination(session, ndb_id, lat, lon))
 
-                print(f"Updated {update_count} NDB records in the current batch.")
+            # batch of 70
+            if len(tasks) == 70:
+                results = await asyncio.gather(*tasks)
+                updated = 0
+                for nid, decl in results:
+                    if decl is not None:
+                        cursor.execute(f'''
+                            UPDATE {quoted_table}
+                               SET Declination = ?
+                             WHERE NDBIdentifier = ?
+                        ''', (decl, nid))
+                        updated += 1
                 conn.commit()
+                print(f"Updated {updated} records in batch of 70.")
                 tasks.clear()
 
-        # Final batch
+        # final batch
         if tasks:
             results = await asyncio.gather(*tasks)
-            update_count = 0
-            for ndb_identifier, declination in results:
-                if declination is not None:
-                    cursor.execute('''
-                        UPDATE "primary_D_B_base_Navaid - NDB Navaid"
-                        SET Declination = ?
-                        WHERE NDBIdentifier = ?
-                    ''', (declination, ndb_identifier))
-                    update_count += 1
-
-            print(f"Updated {update_count} NDB records in the final batch.")
+            updated = 0
+            for nid, decl in results:
+                if decl is not None:
+                    cursor.execute(f'''
+                        UPDATE {quoted_table}
+                           SET Declination = ?
+                         WHERE NDBIdentifier = ?
+                    ''', (decl, nid))
+                    updated += 1
             conn.commit()
+            print(f"Updated {updated} records in final batch.")
 
     conn.close()
-    print("NDB declination update completed successfully.")
+    print("NDB declination update completed.")
 
 if __name__ == "__main__":
     asyncio.run(main())

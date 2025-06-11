@@ -5,7 +5,7 @@ import aiohttp
 import json
 
 # Database path
-db_path = os.path.expanduser("~/Dev/MCDUDatabase.db")
+db_path = os.path.expanduser('~/Dev/MCDUWorldwideDatabase.db')
 
 # API URL and base parameters
 api_url = "https://www.ngdc.noaa.gov/geomag-web/calculators/calculateDeclination"
@@ -20,108 +20,125 @@ params_template = {
     "resultFormat": "json"
 }
 
-async def fetch_declination(session, vor_identifier, lat, lon):
+async def fetch_declination(session, vor_id, lat, lon):
     lat1 = abs(lat)
-    lat1Hemisphere = "N" if lat >= 0 else "S"
+    latHem = "N" if lat >= 0 else "S"
     lon1 = abs(lon)
-    lon1Hemisphere = "E" if lon >= 0 else "W"
+    lonHem = "E" if lon >= 0 else "W"
     params = {
         **params_template,
         "lat1": lat1,
-        "lat1Hemisphere": lat1Hemisphere,
+        "lat1Hemisphere": latHem,
         "lon1": lon1,
-        "lon1Hemisphere": lon1Hemisphere
+        "lon1Hemisphere": lonHem
     }
 
-    async with session.get(api_url, params=params) as response:
-        if response.status == 200:
+    async with session.get(api_url, params=params) as resp:
+        text = await resp.text()
+        if resp.status == 200:
             try:
-                text = await response.text()
                 data = json.loads(text)
-                declination = data["result"][0]["declination"]
-                return vor_identifier, declination
-            except (json.JSONDecodeError, KeyError, IndexError) as e:
-                print(f"Error parsing JSON response for VOR {vor_identifier}: {e}")
-                return vor_identifier, None
+                decl = data["result"][0]["declination"]
+                return vor_id, decl
+            except (KeyError, IndexError, json.JSONDecodeError) as e:
+                print(f"[JSON parse error] {vor_id}: {e}")
         else:
-            print(f"API request failed for VOR {vor_identifier}: {response.status}")
-            return vor_identifier, None
+            print(f"[HTTP {resp.status}] {vor_id} – response was:\n{text[:200]}")
+    return vor_id, None
 
 async def main():
-    # Connect to the database
     conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-
-    # Add the Declination column if not already present
+    cur = conn.cursor()
     try:
-        cursor.execute('''
+        cur.execute('''
             ALTER TABLE "primary_D__base_Navaid - VHF Navaid"
             ADD COLUMN Declination REAL
         ''')
         conn.commit()
-        print("Declination column added.")
     except sqlite3.OperationalError:
-        print("Declination column already exists.")
+        pass
 
-    # Query data from the table
-    cursor.execute('''
-        SELECT VORIdentifier, DMELatitude_WGS84, DMELongitude_WGS84
+    # now select both VOR and DME cols:
+    cur.execute('''
+        SELECT VORIdentifier,
+               VORLatitude_WGS84, VORLongitude_WGS84,
+               DMELatitude_WGS84, DMELongitude_WGS84
         FROM "primary_D__base_Navaid - VHF Navaid"
     ''')
+    rows = cur.fetchall()
+    total = len(rows)
+    print(f"Total VORs: {total}")
 
-    all_rows = cursor.fetchall()
     tasks = []
+    processed = 0
+    batch = 1
 
     async with aiohttp.ClientSession() as session:
-        for row in all_rows:
-            vor_identifier, lat_str, lon_str = row
-            if lat_str is None or lon_str is None:
-                print(f"Skipping VOR {vor_identifier} due to missing coordinates.")
+        for vor_id, vlat, vlon, dlat, dlon in rows:
+            # pick lat
+            if vlat not in (None, ""):
+                lat_s = vlat
+            elif dlat not in (None, ""):
+                lat_s = dlat
+            else:
+                print(f"Skipping {vor_id}: no latitude")
+                processed += 1
+                continue
+
+            # pick lon
+            if vlon not in (None, ""):
+                lon_s = vlon
+            elif dlon not in (None, ""):
+                lon_s = dlon
+            else:
+                print(f"Skipping {vor_id}: no longitude")
+                processed += 1
                 continue
 
             try:
-                lat = float(lat_str)
-                lon = float(lon_str)
-                tasks.append(fetch_declination(session, vor_identifier, lat, lon))
+                lat = float(lat_s)
+                lon = float(lon_s)
             except ValueError:
-                print(f"Invalid coordinates for VOR {vor_identifier}. Skipping.")
+                print(f"Skipping {vor_id}: invalid coords")
+                processed += 1
                 continue
 
-            # Batch processing every 50
+            tasks.append(fetch_declination(session, vor_id, lat, lon))
+
             if len(tasks) == 50:
                 results = await asyncio.gather(*tasks)
-                update_count = 0
-                for vor_identifier, declination in results:
-                    if declination is not None:
-                        cursor.execute('''
+                updated = 0
+                for vid, decl in results:
+                    processed += 1
+                    if decl is not None:
+                        cur.execute('''
                             UPDATE "primary_D__base_Navaid - VHF Navaid"
-                            SET Declination = ?
-                            WHERE VORIdentifier = ?
-                        ''', (declination, vor_identifier))
-                        update_count += 1
-
-                print(f"Updated {update_count} VOR records in the current batch.")
+                               SET Declination = ?
+                             WHERE VORIdentifier = ?
+                        ''', (decl, vid))
+                        updated += 1
                 conn.commit()
+                print(f"Batch {batch}: {processed}/{total} processed, {updated} updated")
                 tasks.clear()
+                batch += 1
 
-        # Final batch processing
         if tasks:
             results = await asyncio.gather(*tasks)
-            update_count = 0
-            for vor_identifier, declination in results:
-                if declination is not None:
-                    cursor.execute('''
+            updated = 0
+            for vid, decl in results:
+                processed += 1
+                if decl is not None:
+                    cur.execute('''
                         UPDATE "primary_D__base_Navaid - VHF Navaid"
-                        SET Declination = ?
-                        WHERE VORIdentifier = ?
-                    ''', (declination, vor_identifier))
-                    update_count += 1
-
-            print(f"Updated {update_count} VOR records in the final batch.")
+                           SET Declination = ?
+                         WHERE VORIdentifier = ?
+                    ''', (decl, vid))
+                    updated += 1
             conn.commit()
+            print(f"Final batch {batch}: {processed}/{total} processed, {updated} updated")
 
     conn.close()
-    print("VOR declination update completed successfully.")
+    print("VOR declination update completed.")
 
 if __name__ == "__main__":
     asyncio.run(main())

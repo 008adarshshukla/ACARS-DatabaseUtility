@@ -5,7 +5,7 @@ import aiohttp
 import json
 
 # Database path
-db_path = os.path.expanduser("~/Dev/MCDUDatabase.db")
+db_path = os.path.expanduser('~/Dev/MCDUWorldwideDatabase.db')
 
 # API URL and parameters
 api_url = "https://www.ngdc.noaa.gov/geomag-web/calculators/calculateDeclination"

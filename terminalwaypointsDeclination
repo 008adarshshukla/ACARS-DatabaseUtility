@@ -5,7 +5,7 @@ import aiohttp
 import json
 
 # Database path
-db_path = os.path.expanduser("~/Dev/MCDUDatabase.db")
+db_path = os.path.expanduser('~/Dev/MCDUWorldwideDatabase.db')
 
 # API URL and base parameters
 api_url = "https://www.ngdc.noaa.gov/geomag-web/calculators/calculateDeclination"
@@ -41,11 +41,10 @@ async def fetch_declination(session, waypoint_identifier, lat, lon):
                 declination = data["result"][0]["declination"]
                 return waypoint_identifier, declination
             except (json.JSONDecodeError, KeyError, IndexError) as e:
-                print(f"Error parsing JSON response for Waypoint {waypoint_identifier}: {e}")
-                return waypoint_identifier, None
+                print(f"Error parsing JSON for {waypoint_identifier}: {e}")
         else:
-            print(f"API request failed for Waypoint {waypoint_identifier}: {response.status}")
-            return waypoint_identifier, None
+            print(f"HTTP {response.status} for {waypoint_identifier}")
+    return waypoint_identifier, None
 
 async def main():
     # Connect to the database
@@ -70,14 +69,18 @@ async def main():
     ''')
 
     all_rows = cursor.fetchall()
+    total = len(all_rows)
+    print(f"Total waypoints to process: {total}")
+
     tasks = []
     batch_number = 1
+    processed = 0
 
     async with aiohttp.ClientSession() as session:
-        for row in all_rows:
-            waypoint_identifier, lat_str, lon_str = row
+        for waypoint_identifier, lat_str, lon_str in all_rows:
             if lat_str is None or lon_str is None:
-                print(f"Skipping Waypoint {waypoint_identifier} due to missing coordinates.")
+                print(f"Skipping {waypoint_identifier}: missing coords.")
+                processed += 1
                 continue
 
             try:
@@ -85,24 +88,30 @@ async def main():
                 lon = float(lon_str)
                 tasks.append(fetch_declination(session, waypoint_identifier, lat, lon))
             except ValueError:
-                print(f"Invalid coordinates for Waypoint {waypoint_identifier}. Skipping.")
+                print(f"Skipping {waypoint_identifier}: invalid coords.")
+                processed += 1
                 continue
 
-            # Process in batches of 50
-            if len(tasks) == 50:
+            # Process in batches of 70
+            if len(tasks) == 70:
                 results = await asyncio.gather(*tasks)
                 update_count = 0
-                for waypoint_identifier, declination in results:
-                    if declination is not None:
+                for wpt, decl in results:
+                    processed += 1
+                    if decl is not None:
                         cursor.execute('''
                             UPDATE "primary_P_C_base_Airport - Terminal Waypoints"
                             SET Declination = ?
                             WHERE WaypointIdentifier = ?
-                        ''', (declination, waypoint_identifier))
+                        ''', (decl, wpt))
                         update_count += 1
 
-                print(f"Updated {update_count} waypoint records in current batch {batch_number}")
                 conn.commit()
+                print(
+                    f"Batch {batch_number} complete: "
+                    f"Processed {processed}/{total} waypoints "
+                    f"({update_count} updated)"
+                )
                 tasks.clear()
                 batch_number += 1
 
@@ -110,17 +119,22 @@ async def main():
         if tasks:
             results = await asyncio.gather(*tasks)
             update_count = 0
-            for waypoint_identifier, declination in results:
-                if declination is not None:
+            for wpt, decl in results:
+                processed += 1
+                if decl is not None:
                     cursor.execute('''
                         UPDATE "primary_P_C_base_Airport - Terminal Waypoints"
                         SET Declination = ?
                         WHERE WaypointIdentifier = ?
-                    ''', (declination, waypoint_identifier))
+                    ''', (decl, wpt))
                     update_count += 1
 
-            print(f"Updated {update_count} waypoint records in final batch {batch_number}")
             conn.commit()
+            print(
+                f"Final batch {batch_number} complete: "
+                f"Processed {processed}/{total} waypoints "
+                f"({update_count} updated)"
+            )
 
     conn.close()
     print("Terminal waypoint declination update completed successfully.")

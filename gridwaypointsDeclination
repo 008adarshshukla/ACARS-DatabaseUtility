@@ -5,7 +5,7 @@ import aiohttp
 import json
 
 # Database path
-db_path = os.path.expanduser("~/Dev/MCDUDatabase.db")
+db_path = os.path.expanduser('~/Dev/MCDUWorldwideDatabase.db')
 
 # API URL and base parameters
 api_url = "https://www.ngdc.noaa.gov/geomag-web/calculators/calculateDeclination"
@@ -64,9 +64,16 @@ async def main():
         print("Declination column already exists.")
 
     # Query data from the table
+    # cursor.execute('''
+    #     SELECT WaypointIdentifier, WaypointLatitude_WGS84, WaypointLongitude_WGS84
+    #     FROM "primary_E_A_base_Enroute - Grid Waypoints"
+    # ''')
     cursor.execute('''
-        SELECT WaypointIdentifier, WaypointLatitude_WGS84, WaypointLongitude_WGS84
-        FROM "primary_E_A_base_Enroute - Grid Waypoints"
+        SELECT WaypointIdentifier,
+               WaypointLatitude_WGS84,
+               WaypointLongitude_WGS84
+          FROM "primary_E_A_base_Enroute - Grid Waypoints"
+        LIMIT -1 OFFSET 75000
     ''')
 
     all_rows = cursor.fetchall()
